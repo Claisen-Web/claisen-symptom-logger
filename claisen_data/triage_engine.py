@@ -1,13 +1,90 @@
 from typing import Dict
-
-# Placeholder: import the question structure
 from .triage_questions import TRIAGE_QUESTIONS
+import spacy
+import re
 
-def assign_profile(answers: Dict) -> Dict:
+# Load spaCy English model (will require python -m spacy download en_core_web_sm)
+try:
+    nlp = spacy.load("en_core_web_sm")
+except Exception:
+    nlp = None
+
+def extract_symptoms_from_text(text: str) -> Dict:
+    """
+    Use spaCy to extract symptoms, severity, and triggers from free-text notes.
+    Returns a dict of structured findings.
+    """
+    if not text or not nlp:
+        return {}
+    doc = nlp(text)
+    findings = {"symptoms": [], "severity": None, "triggers": [], "timing": [], "sentiment": None}
+    # Simple keyword-based extraction for demo
+    SYMPTOM_KEYWORDS = ["bloating", "gas", "heartburn", "pain", "burning", "nausea", "vomiting", "cough", "choking", "burping", "hiccups", "sour taste", "fullness", "tightness", "pressure"]
+    for token in doc:
+        for kw in SYMPTOM_KEYWORDS:
+            if kw in token.text.lower() and kw not in findings["symptoms"]:
+                findings["symptoms"].append(kw)
+    # Severity (look for numbers or adjectives)
+    if re.search(r"severe|unbearable|can't sleep|awful|worst|disabling", text, re.I):
+        findings["severity"] = "severe"
+    elif re.search(r"mild|slight|occasional|manageable|better", text, re.I):
+        findings["severity"] = "mild"
+    elif re.search(r"moderate|bothersome|often|frequent", text, re.I):
+        findings["severity"] = "moderate"
+    # Triggers
+    for trigger in ["night", "lying down", "after eating", "spicy", "fatty", "stress", "anxiety", "exercise", "alcohol", "caffeine"]:
+        if trigger in text.lower():
+            findings["triggers"].append(trigger)
+    # Timing
+    for timing in ["night", "morning", "after meals", "bedtime", "daily", "weekly"]:
+        if timing in text.lower():
+            findings["timing"].append(timing)
+    # Sentiment (very basic)
+    if re.search(r"can't cope|hopeless|urgent|worried|scared|afraid|emergency", text, re.I):
+        findings["sentiment"] = "urgent"
+    elif re.search(r"coping|ok|fine|improving|better", text, re.I):
+        findings["sentiment"] = "stable"
+    return findings
+
+def assign_profile(answers: Dict, notes: str = None) -> Dict:
     """
     Assign dosing profile (1-5) based on advanced triage logic from README and all question domains.
     Returns dict with profile, reason, and detailed recommendation.
+    Uses NLP on notes if provided.
     """
+    nlp_extracted = extract_symptoms_from_text(notes) if notes else {}
+    # Use NLP findings to influence triage
+    nlp_severity = nlp_extracted.get("severity")
+    nlp_symptoms = nlp_extracted.get("symptoms", [])
+    nlp_triggers = nlp_extracted.get("triggers", [])
+    nlp_sentiment = nlp_extracted.get("sentiment")
+    # If NLP finds urgent sentiment, escalate
+    if nlp_sentiment == "urgent":
+        return {
+            "profile": 5,
+            "reason": "NLP detected urgent sentiment in notes.",
+            "recommendation": (
+                "[bold red]URGENT: Your notes suggest you may need immediate medical attention.[/bold red]\n"
+                "- Please seek emergency care or contact your doctor immediately.\n"
+            ),
+            "nlp_extracted": nlp_extracted
+        }
+    # If NLP finds severe symptoms at night, suggest nocturnal GERD
+    if nlp_severity == "severe" and ("night" in nlp_triggers or "night" in nlp_extracted.get("timing", [])):
+        return {
+            "profile": 3,
+            "reason": "NLP detected severe nocturnal symptoms in notes.",
+            "recommendation": (
+                "[bold magenta]Severe night-time symptoms detected.[/bold magenta]\n"
+                "- Start omeprazole 20 mg AM + famotidine 10–20 mg at bedtime for 14 days.\n"
+                "- Elevate head of bed, avoid late meals, and sleep on left side.\n"
+                "- [cyan]Reassess in 7–14 days. If persistent, escalate to Profile 4.[/cyan]"
+            ),
+            "nlp_extracted": nlp_extracted
+        }
+    # If NLP finds stress/anxiety as trigger, add to recommendations
+    stress_nlp = any(t in nlp_triggers for t in ["stress", "anxiety"])
+    # Continue with main triage logic, but add NLP findings to recommendations
     # Profile 5: Alarm features (Q19–Q27)
     alarm_keys = [
         'weight_change', 'vomiting_blood', 'dysphagia', 'odynophagia',
@@ -30,7 +107,8 @@ def assign_profile(answers: Dict) -> Dict:
                     "- 5% weight loss + alarm: 14-day cancer pathway.\n"
                     "- Family history of GI cancer: expedited scope.\n"
                     "- Document alarm features and duration clearly.\n"
-                )
+                ),
+                "nlp_extracted": nlp_extracted
             }
 
     # Profile 1: Mild, infrequent GERD (with subtypes)
@@ -63,7 +141,8 @@ def assign_profile(answers: Dict) -> Dict:
                 f"{stress_note}"
                 "- No need for daily acid suppression.\n"
                 "- [cyan]Follow up in 7 days to reassess control.[/cyan]"
-            )
+            ),
+            "nlp_extracted": nlp_extracted
         }
 
     # Profile 2: Moderate classic GERD (with subtypes)
@@ -91,7 +170,8 @@ def assign_profile(answers: Dict) -> Dict:
                 "- Keep a symptom diary.\n"
                 f"{med_note}"
                 "- [cyan]Reassess at Day 7 and Day 14. If improved, stop PPI and continue PRN antacids. If not, escalate to Profile 3 or 4.[/cyan]"
-            )
+            ),
+            "nlp_extracted": nlp_extracted
         }
 
     # Profile 3: Nocturnal/positional GERD (with subtypes)
@@ -110,7 +190,8 @@ def assign_profile(answers: Dict) -> Dict:
                 "- Avoid late meals and alcohol.\n"
                 "- Sleep on left side if possible.\n"
                 "- [cyan]Reassess at Day 7 and Day 14. If persistent, consider Profile 4.[/cyan]"
-            )
+            ),
+            "nlp_extracted": nlp_extracted
         }
     # Profile 3 (alternate): High-risk lifestyle triggers
     if (
@@ -128,7 +209,8 @@ def assign_profile(answers: Dict) -> Dict:
                 "- Eliminate or reduce alcohol and tobacco.\n"
                 "- Elevate head of bed.\n"
                 "- Consider short-term dual therapy (omeprazole + famotidine) if symptoms persist.\n"
-            )
+            ),
+            "nlp_extracted": nlp_extracted
         }
 
     # Profile 4: Suspected functional/refractory GERD (with subtypes)
@@ -153,7 +235,8 @@ def assign_profile(answers: Dict) -> Dict:
                 "- Consider simethicone or alginate-based agents for interim relief.\n"
                 f"{ibs_note}"
                 "- [cyan]Continue symptom diary and dietary reprogramming.[/cyan]"
-            )
+            ),
+            "nlp_extracted": nlp_extracted
         }
 
     # Profile 2 (alternate): Moderate symptoms with some lifestyle risk
@@ -169,16 +252,25 @@ def assign_profile(answers: Dict) -> Dict:
                 "[bold yellow]Lifestyle modification + consider short PPI course.[/bold yellow]\n"
                 "- Reduce meal size, avoid late eating, limit alcohol.\n"
                 "- Reassess in 7–14 days.\n"
-            )
+            ),
+            "nlp_extracted": nlp_extracted
         }
 
     # Default: Profile 2 (moderate)
-    return {
+    result = {
         "profile": 2,
         "reason": "Default: moderate symptoms (expand logic as needed)",
         "recommendation": (
             "[bold yellow]Lifestyle modification + consider short PPI course.[/bold yellow]\n"
             "- Reduce meal size, avoid late eating, limit alcohol.\n"
             "- Reassess in 7–14 days.\n"
-        )
-    } 
+        ),
+        "nlp_extracted": nlp_extracted
+    }
+    # If NLP found stress/anxiety, add to recommendation
+    if stress_nlp:
+        result["recommendation"] += "- [yellow]Your notes suggest stress/anxiety as a trigger. Consider stress management or psychological support.[/yellow]\n"
+    # If NLP found specific symptoms, add to recommendation
+    if nlp_symptoms:
+        result["recommendation"] += f"- [cyan]NLP extracted symptoms: {', '.join(nlp_symptoms)}[/cyan]\n"
+    return result 

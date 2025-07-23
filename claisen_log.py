@@ -151,7 +151,7 @@ def export_entries(fmt, out):
     else:
         console.print("[red]Unknown format. Use 'json' or 'csv'.")
 
-def run_advanced_triage(answers_arg=None, followup_day=None):
+def run_advanced_triage(answers_arg=None, followup_day=None, notes=None):
     answers = {}
     # If answers_arg is provided, parse it (as JSON or key=value pairs)
     import json
@@ -196,8 +196,8 @@ def run_advanced_triage(answers_arg=None, followup_day=None):
                     console.print("[red]Please enter a valid number.[/red]")
         else:
             answers[q['id']] = input(f"{q['text']} ").strip()
-    # Assign profile
-    profile_result = assign_profile(answers)
+    # Assign profile (now passes notes)
+    profile_result = assign_profile(answers, notes=notes)
     console.print(f"\n[bold cyan]Dosing Profile: {profile_result['profile']}[/bold cyan]")
     console.print(f"[green]{profile_result['reason']}[/green]")
     console.print(profile_result.get('recommendation', ''))
@@ -210,7 +210,9 @@ def run_advanced_triage(answers_arg=None, followup_day=None):
         'profile': profile_result['profile'],
         'profile_reason': profile_result['reason'],
         'recommendation': profile_result.get('recommendation', ''),
-        'followup_day': followup_day
+        'nlp_extracted': profile_result.get('nlp_extracted', {}),
+        'followup_day': followup_day,
+        'notes': notes
     }
     data.append(entry)
     save_data(data)
@@ -241,6 +243,7 @@ def main():
     triage_parser = subparsers.add_parser('triage', help='Run advanced triage and dosing profile assignment')
     triage_parser.add_argument('--answers', type=str, help='Non-interactive: JSON or comma-separated key=value pairs for answers')
     triage_parser.add_argument('--followup', type=int, choices=[7, 14, 28], help='Day of follow-up session (7, 14, 28)')
+    triage_parser.add_argument('--notes', type=str, help='Free-text notes or symptom description for NLP extraction')
 
     args = parser.parse_args()
 
@@ -253,7 +256,7 @@ def main():
     elif args.command == 'export':
         export_entries(args.format, args.out)
     elif args.command == 'triage':
-        run_advanced_triage(answers_arg=args.answers, followup_day=args.followup)
+        run_advanced_triage(answers_arg=args.answers, followup_day=args.followup, notes=args.notes)
     else:
         parser.print_help()
 

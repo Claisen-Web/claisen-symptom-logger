@@ -1,2 +1,4 @@
 pydantic
-rich 
+rich
+spacy
+scikit-learn 
