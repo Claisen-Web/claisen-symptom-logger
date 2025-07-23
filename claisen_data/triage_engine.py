@@ -2,12 +2,67 @@ from typing import Dict
 from .triage_questions import TRIAGE_QUESTIONS
 import spacy
 import re
+from spacy.pipeline import EntityRuler
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
+import numpy as np
 
-# Load spaCy English model (will require python -m spacy download en_core_web_sm)
+# Load spaCy English model
 try:
     nlp = spacy.load("en_core_web_sm")
+    # Add custom EntityRuler for medical/symptom entities
+    ruler = EntityRuler(nlp, overwrite_ents=True)
+    patterns = [
+        {"label": "SYMPTOM", "pattern": "bloating"},
+        {"label": "SYMPTOM", "pattern": "gas"},
+        {"label": "SYMPTOM", "pattern": "heartburn"},
+        {"label": "SYMPTOM", "pattern": "burning pain"},
+        {"label": "SYMPTOM", "pattern": "nausea"},
+        {"label": "SYMPTOM", "pattern": "vomiting"},
+        {"label": "SYMPTOM", "pattern": "cough"},
+        {"label": "SYMPTOM", "pattern": "choking"},
+        {"label": "SYMPTOM", "pattern": "burping"},
+        {"label": "SYMPTOM", "pattern": "hiccups"},
+        {"label": "SYMPTOM", "pattern": "sour taste"},
+        {"label": "SYMPTOM", "pattern": "fullness"},
+        {"label": "SYMPTOM", "pattern": "tightness"},
+        {"label": "SYMPTOM", "pattern": "pressure"},
+        {"label": "TRIGGER", "pattern": "spicy food"},
+        {"label": "TRIGGER", "pattern": "fatty food"},
+        {"label": "TRIGGER", "pattern": "alcohol"},
+        {"label": "TRIGGER", "pattern": "caffeine"},
+        {"label": "TRIGGER", "pattern": "stress"},
+        {"label": "TRIGGER", "pattern": "anxiety"},
+        {"label": "TRIGGER", "pattern": "night"},
+        {"label": "TRIGGER", "pattern": "lying down"},
+        {"label": "TRIGGER", "pattern": "after eating"},
+    ]
+    ruler.add_patterns(patterns)
+    nlp.add_pipe(ruler, before="ner")
 except Exception:
     nlp = None
+
+# Simple urgency classifier (demo)
+# In practice, you would train this on real labeled data
+URGENCY_EXAMPLES = [
+    "I am scared and can't cope anymore",  # urgent
+    "I vomited blood last night",          # urgent
+    "I feel fine, just mild discomfort",   # not urgent
+    "Symptoms are manageable",             # not urgent
+    "I can't sleep and the pain is unbearable", # urgent
+    "I have some heartburn after meals",   # not urgent
+]
+URGENCY_LABELS = [1, 1, 0, 0, 1, 0]
+vectorizer = TfidfVectorizer()
+X = vectorizer.fit_transform(URGENCY_EXAMPLES)
+clf = LogisticRegression().fit(X, URGENCY_LABELS)
+
+def urgency_predict(text: str) -> bool:
+    if not text:
+        return False
+    X_test = vectorizer.transform([text])
+    pred = clf.predict(X_test)
+    return bool(pred[0])
 
 def extract_symptoms_from_text(text: str) -> Dict:
     """
@@ -17,13 +72,14 @@ def extract_symptoms_from_text(text: str) -> Dict:
     if not text or not nlp:
         return {}
     doc = nlp(text)
-    findings = {"symptoms": [], "severity": None, "triggers": [], "timing": [], "sentiment": None}
-    # Simple keyword-based extraction for demo
-    SYMPTOM_KEYWORDS = ["bloating", "gas", "heartburn", "pain", "burning", "nausea", "vomiting", "cough", "choking", "burping", "hiccups", "sour taste", "fullness", "tightness", "pressure"]
-    for token in doc:
-        for kw in SYMPTOM_KEYWORDS:
-            if kw in token.text.lower() and kw not in findings["symptoms"]:
-                findings["symptoms"].append(kw)
+    findings = {"symptoms": [], "severity": None, "triggers": [], "timing": [], "sentiment": None, "entities": []}
+    # Use custom entities
+    for ent in doc.ents:
+        if ent.label_ == "SYMPTOM" and ent.text not in findings["symptoms"]:
+            findings["symptoms"].append(ent.text)
+        if ent.label_ == "TRIGGER" and ent.text not in findings["triggers"]:
+            findings["triggers"].append(ent.text)
+        findings["entities"].append((ent.text, ent.label_))
     # Severity (look for numbers or adjectives)
     if re.search(r"severe|unbearable|can't sleep|awful|worst|disabling", text, re.I):
         findings["severity"] = "severe"
@@ -31,16 +87,16 @@ def extract_symptoms_from_text(text: str) -> Dict:
         findings["severity"] = "mild"
     elif re.search(r"moderate|bothersome|often|frequent", text, re.I):
         findings["severity"] = "moderate"
-    # Triggers
+    # Triggers (fallback)
     for trigger in ["night", "lying down", "after eating", "spicy", "fatty", "stress", "anxiety", "exercise", "alcohol", "caffeine"]:
-        if trigger in text.lower():
+        if trigger in text.lower() and trigger not in findings["triggers"]:
             findings["triggers"].append(trigger)
     # Timing
     for timing in ["night", "morning", "after meals", "bedtime", "daily", "weekly"]:
         if timing in text.lower():
             findings["timing"].append(timing)
     # Sentiment (very basic)
-    if re.search(r"can't cope|hopeless|urgent|worried|scared|afraid|emergency", text, re.I):
+    if urgency_predict(text):
         findings["sentiment"] = "urgent"
     elif re.search(r"coping|ok|fine|improving|better", text, re.I):
         findings["sentiment"] = "stable"
@@ -53,16 +109,15 @@ def assign_profile(answers: Dict, notes: str = None) -> Dict:
     Uses NLP on notes if provided.
     """
     nlp_extracted = extract_symptoms_from_text(notes) if notes else {}
-    # Use NLP findings to influence triage
     nlp_severity = nlp_extracted.get("severity")
     nlp_symptoms = nlp_extracted.get("symptoms", [])
     nlp_triggers = nlp_extracted.get("triggers", [])
     nlp_sentiment = nlp_extracted.get("sentiment")
-    # If NLP finds urgent sentiment, escalate
+    # If classifier or NLP finds urgent sentiment, escalate
     if nlp_sentiment == "urgent":
         return {
             "profile": 5,
-            "reason": "NLP detected urgent sentiment in notes.",
+            "reason": "AI/NLP detected urgent sentiment in notes.",
             "recommendation": (
                 "[bold red]URGENT: Your notes suggest you may need immediate medical attention.[/bold red]\n"
                 "- Please seek emergency care or contact your doctor immediately.\n"
@@ -73,7 +128,7 @@ def assign_profile(answers: Dict, notes: str = None) -> Dict:
     if nlp_severity == "severe" and ("night" in nlp_triggers or "night" in nlp_extracted.get("timing", [])):
         return {
             "profile": 3,
-            "reason": "NLP detected severe nocturnal symptoms in notes.",
+            "reason": "AI/NLP detected severe nocturnal symptoms in notes.",
             "recommendation": (
                 "[bold magenta]Severe night-time symptoms detected.[/bold magenta]\n"
                 "- Start omeprazole 20 mg AM + famotidine 10–20 mg at bedtime for 14 days.\n"
@@ -272,5 +327,9 @@ def assign_profile(answers: Dict, notes: str = None) -> Dict:
         result["recommendation"] += "- [yellow]Your notes suggest stress/anxiety as a trigger. Consider stress management or psychological support.[/yellow]\n"
     # If NLP found specific symptoms, add to recommendation
     if nlp_symptoms:
-        result["recommendation"] += f"- [cyan]NLP extracted symptoms: {', '.join(nlp_symptoms)}[/cyan]\n"
+        result["recommendation"] += f"- [cyan]AI/NLP extracted symptoms: {', '.join(nlp_symptoms)}[/cyan]\n"
+    # If custom entities found, add to recommendation
+    if nlp_extracted.get("entities"):
+        ents = ", ".join([f"{text} ({label})" for text, label in nlp_extracted["entities"]])
+        result["recommendation"] += f"- [green]AI/NLP entities: {ents}[/green]\n"
     return result 
