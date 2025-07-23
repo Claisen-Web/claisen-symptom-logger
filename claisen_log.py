@@ -200,6 +200,7 @@ def run_advanced_triage(answers_arg=None, followup_day=None):
     profile_result = assign_profile(answers)
     console.print(f"\n[bold cyan]Dosing Profile: {profile_result['profile']}[/bold cyan]")
     console.print(f"[green]{profile_result['reason']}[/green]")
+    console.print(profile_result.get('recommendation', ''))
     # Store in data
     today = str(date.today())
     data = load_data()
@@ -208,6 +209,7 @@ def run_advanced_triage(answers_arg=None, followup_day=None):
         'triage_answers': answers,
         'profile': profile_result['profile'],
         'profile_reason': profile_result['reason'],
+        'recommendation': profile_result.get('recommendation', ''),
         'followup_day': followup_day
     }
     data.append(entry)
