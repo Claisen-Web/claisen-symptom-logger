@@ -3,14 +3,40 @@ import os
 import json
 import argparse
 from datetime import date, datetime
-from typing import List, Dict
+from typing import List, Dict, Optional
+from pydantic import BaseModel, ValidationError, validator
+from rich.console import Console
+from rich.table import Table
+from claisen_data.triage_questions import TRIAGE_QUESTIONS
+from claisen_data.triage_engine import assign_profile
 
 SYMPTOMS = ['bloating', 'gas', 'heartburn']
-# Store data in the current project directory
-DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'claisen_data')
-DATA_FILE = os.path.join(DATA_DIR, 'symptoms.json')
+# Store data in the user's home directory
+DATA_DIR = os.path.expanduser('~/.claisen')
+DATA_FILE = os.path.join(DATA_DIR, 'data.db')
+console = Console()
 
-# Utility functions
+class SymptomEntry(BaseModel):
+    name: str
+    severity: int
+
+    @validator('name')
+    def name_must_be_valid(cls, v):
+        if v not in SYMPTOMS:
+            raise ValueError(f"Invalid symptom: {v}")
+        return v
+
+    @validator('severity')
+    def severity_must_be_1_5(cls, v):
+        if not (1 <= v <= 5):
+            raise ValueError("Severity must be between 1 and 5")
+        return v
+
+class DayLog(BaseModel):
+    date: str
+    symptoms: List[SymptomEntry]
+    notes: Optional[str] = ''
+
 def load_data() -> List[Dict]:
     if not os.path.exists(DATA_FILE):
         return []
@@ -26,13 +52,13 @@ def init_db():
     os.makedirs(DATA_DIR, exist_ok=True)
     if not os.path.exists(DATA_FILE):
         save_data([])
-        print(f"Initialized new symptom log at {DATA_FILE}")
+        console.print(f"[green]Initialized new symptom log at {DATA_FILE}")
     else:
-        print(f"Symptom log already exists at {DATA_FILE}")
+        console.print(f"[yellow]Symptom log already exists at {DATA_FILE}")
 
 def prompt_symptoms_with_severity():
-    print("Which symptoms are you experiencing today? (comma-separated)")
-    print(f"Options: {', '.join(SYMPTOMS)}")
+    console.print("Which symptoms are you experiencing today? (comma-separated)")
+    console.print(f"Options: {', '.join(SYMPTOMS)}")
     raw = input("Symptoms: ").strip().lower()
     selected = [s.strip() for s in raw.split(',') if s.strip() in SYMPTOMS]
     symptoms = []
@@ -40,13 +66,11 @@ def prompt_symptoms_with_severity():
         while True:
             try:
                 sev = int(input(f"Severity for {s} (1-5): "))
-                if 1 <= sev <= 5:
-                    symptoms.append({'name': s, 'severity': sev})
-                    break
-                else:
-                    print("Please enter a number between 1 and 5.")
-            except ValueError:
-                print("Please enter a valid integer.")
+                entry = SymptomEntry(name=s, severity=sev)
+                symptoms.append(entry.dict())
+                break
+            except (ValueError, ValidationError) as e:
+                console.print(f"[red]{e}")
     return symptoms
 
 def triage(symptoms):
@@ -64,43 +88,57 @@ def triage(symptoms):
         return "Symptoms noted. Monitor and consult a professional if persistent."
     return '\n'.join(messages)
 
-def add_entry():
+def add_entry_cli(symptoms_arg, severity_arg, notes_arg):
     today = str(date.today())
     data = load_data()
     if any(entry['date'] == today for entry in data):
-        print(f"You have already logged symptoms for today.")
+        console.print(f"[yellow]You have already logged symptoms for today.")
         return
-    symptoms = prompt_symptoms_with_severity()
-    notes = input("Any notes? (optional): ").strip()
-    entry = {
-        'date': today,
-        'symptoms': symptoms,
-        'notes': notes
-    }
-    data.append(entry)
+    symptoms = []
+    if symptoms_arg and severity_arg:
+        for s in symptoms_arg.split(','):
+            s = s.strip()
+            try:
+                entry = SymptomEntry(name=s, severity=int(severity_arg))
+                symptoms.append(entry.dict())
+            except ValidationError as e:
+                console.print(f"[red]{e}")
+                return
+    else:
+        symptoms = prompt_symptoms_with_severity()
+    notes = notes_arg or input("Any notes? (optional): ").strip()
+    try:
+        entry = DayLog(date=today, symptoms=symptoms, notes=notes)
+    except ValidationError as e:
+        console.print(f"[red]{e}")
+        return
+    data.append(entry.dict())
     save_data(data)
-    print("\nTriage:")
-    print(triage(symptoms))
+    console.print("\n[bold green]Triage:[/bold green]")
+    console.print(triage(symptoms))
 
 def show_entries(last_n=None):
     data = load_data()
     if not data:
-        print("No entries found.")
+        console.print("[yellow]No entries found.")
         return
     if last_n:
         data = data[-last_n:]
-    print(f"{'Date':<12} {'Symptoms (severity)':<30} Notes")
-    print("-"*60)
+    table = Table(title="Symptom Log")
+    table.add_column("Date", style="cyan")
+    table.add_column("Symptoms (severity)", style="magenta")
+    table.add_column("Notes", style="white")
     for entry in data:
         sym_str = ', '.join(f"{s['name']}({s['severity']})" for s in entry['symptoms'])
-        print(f"{entry['date']:<12} {sym_str:<30} {entry.get('notes','')}")
+        table.add_row(entry['date'], sym_str, entry.get('notes',''))
+    console.print(table)
 
 def export_entries(fmt, out):
     data = load_data()
     if fmt == 'json':
         with open(out, 'w') as f:
             json.dump(data, f, indent=2)
-        print(f"Exported to {out} (JSON)")
+        console.print(f"[green]Exported to {out} (JSON)")
     elif fmt == 'csv':
         import csv
         with open(out, 'w', newline='') as f:
@@ -109,9 +147,72 @@ def export_entries(fmt, out):
             for entry in data:
                 for s in entry['symptoms']:
                     writer.writerow([entry['date'], s['name'], s['severity'], entry.get('notes','')])
-        print(f"Exported to {out} (CSV)")
+        console.print(f"[green]Exported to {out} (CSV)")
     else:
-        print("Unknown format. Use 'json' or 'csv'.")
+        console.print("[red]Unknown format. Use 'json' or 'csv'.")
+
+def run_advanced_triage(answers_arg=None, followup_day=None):
+    answers = {}
+    # If answers_arg is provided, parse it (as JSON or key=value pairs)
+    import json
+    if answers_arg:
+        try:
+            if answers_arg.strip().startswith('{'):
+                answers = json.loads(answers_arg)
+            else:
+                for pair in answers_arg.split(','):
+                    k, v = pair.split('=', 1)
+                    answers[k.strip()] = v.strip()
+        except Exception as e:
+            console.print(f"[red]Failed to parse --answers: {e}[/red]")
+            return
+    # Interactive mode for missing answers
+    for q in TRIAGE_QUESTIONS:
+        if 'ask_if' in q:
+            cond = q['ask_if']
+            key, val = list(cond.items())[0]
+            if answers.get(key) != val:
+                continue
+        if q['id'] in answers:
+            continue
+        if q['type'] == 'choice':
+            console.print(f"[bold]{q['text']}[/bold]")
+            for idx, opt in enumerate(q['options'], 1):
+                console.print(f"  {idx}. {opt}")
+            while True:
+                resp = input("Enter number: ").strip()
+                if resp.isdigit() and 1 <= int(resp) <= len(q['options']):
+                    answers[q['id']] = q['options'][int(resp)-1]
+                    break
+                else:
+                    console.print("[red]Invalid choice. Try again.[/red]")
+        elif q['type'] == 'int':
+            while True:
+                resp = input(f"{q['text']} ").strip()
+                try:
+                    answers[q['id']] = int(resp)
+                    break
+                except ValueError:
+                    console.print("[red]Please enter a valid number.[/red]")
+        else:
+            answers[q['id']] = input(f"{q['text']} ").strip()
+    # Assign profile
+    profile_result = assign_profile(answers)
+    console.print(f"\n[bold cyan]Dosing Profile: {profile_result['profile']}[/bold cyan]")
+    console.print(f"[green]{profile_result['reason']}[/green]")
+    # Store in data
+    today = str(date.today())
+    data = load_data()
+    entry = {
+        'date': today,
+        'triage_answers': answers,
+        'profile': profile_result['profile'],
+        'profile_reason': profile_result['reason'],
+        'followup_day': followup_day
+    }
+    data.append(entry)
+    save_data(data)
+    console.print("[bold green]Triage result saved.[/bold green]")
 
 def main():
     parser = argparse.ArgumentParser(description="Claisen Symptom Logger")
@@ -121,7 +222,10 @@ def main():
     subparsers.add_parser('init', help='Initialize the symptom log database')
 
     # add
-    subparsers.add_parser('add', help='Add a new symptom entry for today')
+    add_parser = subparsers.add_parser('add', help='Add a new symptom entry for today')
+    add_parser.add_argument('--symptoms', type=str, help='Comma-separated list of symptoms')
+    add_parser.add_argument('--severity', type=int, help='Severity for all symptoms (1-5)')
+    add_parser.add_argument('--notes', type=str, help='Optional notes')
 
     # show
     show_parser = subparsers.add_parser('show', help='Show recent entries')
@@ -132,16 +236,22 @@ def main():
     export_parser.add_argument('--format', choices=['csv', 'json'], required=True, help='Export format')
     export_parser.add_argument('--out', required=True, help='Output file path')
 
+    triage_parser = subparsers.add_parser('triage', help='Run advanced triage and dosing profile assignment')
+    triage_parser.add_argument('--answers', type=str, help='Non-interactive: JSON or comma-separated key=value pairs for answers')
+    triage_parser.add_argument('--followup', type=int, choices=[7, 14, 28], help='Day of follow-up session (7, 14, 28)')
+
     args = parser.parse_args()
 
     if args.command == 'init':
         init_db()
     elif args.command == 'add':
-        add_entry()
+        add_entry_cli(args.symptoms, args.severity, args.notes)
     elif args.command == 'show':
         show_entries(args.last)
     elif args.command == 'export':
         export_entries(args.format, args.out)
+    elif args.command == 'triage':
+        run_advanced_triage(answers_arg=args.answers, followup_day=args.followup)
     else:
         parser.print_help()
 
