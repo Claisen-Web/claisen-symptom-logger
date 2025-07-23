@@ -6,7 +6,8 @@ from datetime import date, datetime
 from typing import List, Dict
 
 SYMPTOMS = ['bloating', 'gas', 'heartburn']
-DATA_DIR = os.path.expanduser('~/.claisen')
+# Store data in the current project directory
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'claisen_data')
 DATA_FILE = os.path.join(DATA_DIR, 'symptoms.json')
 
 # Utility functions
